@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from collections import deque
 
 from bs4 import BeautifulSoup, NavigableString
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page
 from khmercut import tokenize
 
 # -------- Configuration --------
@@ -167,6 +167,16 @@ def process_text(text: str) -> str:
     text_no_imgs = re.sub(r'\[img_.*?\]', '@@IMAGE@@', text)
 
     temp_text = text_no_imgs
+
+    # Remove leading timestamp like "25-09-2025 09:22"
+    timestamp_pattern = re.compile(r'^\s*\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}\s*')
+    temp_text = timestamp_pattern.sub('', temp_text)
+    
+    # --- NEW: Fix incorrect newline after dateline like (ភ្នំពេញ)៖ ---
+    dateline_pattern = re.compile(r'^(\s*\([\u1780-\u17FF\s]+\)៖)\s*\n+')
+    temp_text = dateline_pattern.sub(r'\1 ', temp_text)
+    # ---
+
     for pattern, replacement in CONFIG["anon_patterns"]:
         temp_text = pattern.sub(replacement, temp_text)
     
@@ -176,10 +186,7 @@ def process_text(text: str) -> str:
         "\U0001F1E0-\U0001F1FF" "\U00002702-\U000027B0" "\U000024C2-\U0001F251"
         "]+", flags=re.UNICODE)
     temp_text = emoji_pattern.sub('', temp_text)
-
-    # FIXED: This regex now correctly preserves newlines (\n) and tabs (\t).
     temp_text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', temp_text)
-    
     temp_text = re.sub(r'[ \t]+', ' ', temp_text)
     temp_text = re.sub(r'\n{3,}', '\n\n', temp_text)
 
@@ -236,7 +243,8 @@ def extract_article(html: str, url: str, domain: str = "NEWS"):
         return None
         
     for heading in content_element.find_all(['h1', 'h2', 'h3', 'h4']):
-        if heading.get_text(" ", strip=True) == title:
+        # Use `in` for partial matches, as titles might have extra whitespace
+        if title in heading.get_text(" ", strip=True):
             heading.decompose()
             
     convert_elements_to_text(content_element, url)
@@ -253,7 +261,7 @@ def extract_article(html: str, url: str, domain: str = "NEWS"):
         "url": url,
     }
 
-def crawl_website(seed_url: str, page: 'Page', max_articles: int, existing_hashes: set):
+def crawl_website(seed_url: str, page: Page, max_articles: int, existing_hashes: set):
     queue = deque([seed_url])
     visited = {seed_url}
     processed_articles = []
