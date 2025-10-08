@@ -19,15 +19,20 @@ from khmercut import tokenize
 CONFIG = {
     "output_file": "khmer_dataset.jsonl",
     "min_articles": 10000,
-    "min_words": 150,
+    "min_words": 200,
     "candidate_limit": 50000,
     "request_timeout": 15,
     "sleep_interval": 0.5,
     "user_agent": "Mozilla/5.0 (compatible; KhmerScraper/1.0; +http://example.com/bot)",
     "seed_sites": [
         "https://plus.freshnewsasia.com/",
+        "https://www.freshnewsasia.com/index.php/en/" # Added a more general seed
     ],
-    "article_link_patterns": ["/article/", "/news/", "/post/", "/detail/", re.compile(r'/\d{4,}/\d{2,}/')],
+    "article_link_patterns": [
+        "/article/", "/news/", "/post/", "/detail/", 
+        re.compile(r'/\d{4,}/\d{2,}/'),
+        re.compile(r'index\.php/.+/\d{5,}') # <-- ADDED PATTERN
+    ],
     "pagination_tokens": ["page", "p=", "/page/"],
     "anon_patterns": [
         (re.compile(r'[\w\.-]+@[\w\.-]+\.\w+', re.UNICODE), "[email protected]"),
@@ -58,10 +63,39 @@ def normalize_url(u: str) -> str:
     except Exception:
         return u
 
-def fetch_html_with_playwright(page, url: str) -> str:
+def get_base_domain(url: str) -> str:
+    """Extracts the base domain (e.g., 'freshnewsasia.com') from a URL."""
+    try:
+        domain = urlparse(url).netloc
+        parts = domain.split('.')
+        if len(parts) > 2:
+            # Handle cases like www.example.co.uk
+            if parts[-2] in ['co', 'com', 'org', 'net'] and len(parts[-3]) > 2:
+                 return '.'.join(parts[-3:])
+            return '.'.join(parts[-2:])
+        return domain
+    except:
+        return ""
+
+def fetch_html_with_playwright(page: Page, url: str) -> str:
+    """Fetches HTML content from a URL, handling infinite scroll."""
     try:
         page.goto(url, timeout=30000, wait_until='domcontentloaded')
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(2000) # Initial wait for dynamic elements to load
+
+        # --- ADDED SCROLLING LOGIC ---
+        last_height = page.evaluate("document.body.scrollHeight")
+        for _ in range(5):  # Scroll a maximum of 5 times to prevent infinite loops
+            logging.info("Scrolling page %s...", url)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            page.wait_for_timeout(2500)  # Wait for new content to load
+            new_height = page.evaluate("document.body.scrollHeight")
+            if new_height == last_height:
+                logging.info("Reached end of page for %s", url)
+                break
+            last_height = new_height
+        # --- END OF SCROLLING LOGIC ---
+
         return page.content()
     except Exception as e:
         logging.warning("Playwright navigation failed for %s: %s", url, e)
@@ -149,21 +183,13 @@ def find_best_content_block(soup: BeautifulSoup) -> BeautifulSoup:
 def process_text(text: str) -> str:
     img_placeholders = re.findall(r'(\[img_.*?\])', text)
     text_no_imgs = re.sub(r'\[img_.*?\]', '@@IMAGE@@', text)
-
     temp_text = text_no_imgs
-
-    # Remove leading timestamp like "25-09-2025 09:22"
     timestamp_pattern = re.compile(r'^\s*\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}\s*')
     temp_text = timestamp_pattern.sub('', temp_text)
-    
-    # --- NEW: Fix incorrect newline after dateline like (ភ្នំពេញ)៖ ---
     dateline_pattern = re.compile(r'^(\s*\([\u1780-\u17FF\s]+\)៖)\s*\n+')
     temp_text = dateline_pattern.sub(r'\1 ', temp_text)
-    # ---
-
     for pattern, replacement in CONFIG["anon_patterns"]:
         temp_text = pattern.sub(replacement, temp_text)
-    
     emoji_pattern = re.compile(
         "["
         "\U0001F600-\U0001F64F" "\U0001F300-\U0001F5FF" "\U0001F680-\U0001F6FF"
@@ -173,22 +199,18 @@ def process_text(text: str) -> str:
     temp_text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', temp_text)
     temp_text = re.sub(r'[ \t]+', ' ', temp_text)
     temp_text = re.sub(r'\n{3,}', '\n\n', temp_text)
-
     final_text = temp_text
     if img_placeholders:
         placeholder_iter = iter(img_placeholders)
         final_text = re.sub('@@IMAGE@@', lambda m: next(placeholder_iter), temp_text)
-    
     return final_text.strip()
 
 def is_valid_content(text: str) -> bool:
     segmented_words = tokenize(text)
     word_count = len(segmented_words)
-
     if word_count < CONFIG["min_words"]:
         logging.warning("Article too short (%d words).", word_count)
         return False
-
     sample = text[:1000]
     khmer_chars = len(re.findall(r'[\u1780-\u17FF]', sample))
     total_chars = len(re.findall(r'\S', sample))
@@ -209,23 +231,18 @@ def extract_article(html: str, url: str, domain: str = "NEWS"):
             if title_text:
                 title = title_text
                 break
-    
     if not title:
         logging.warning("Could not extract title for %s", url)
         return None
 
     clean_and_prepare_soup(soup)
     content_element = find_best_content_block(soup)
-    
     if not content_element:
         logging.warning("Could not find a suitable content block for %s", url)
         return None
-        
     for heading in content_element.find_all(['h1', 'h2', 'h3', 'h4']):
-        # Use `in` for partial matches, as titles might have extra whitespace
         if title in heading.get_text(" ", strip=True):
             heading.decompose()
-            
     convert_elements_to_text(content_element, url)
     text = content_element.get_text("\n", strip=True)
     final_text = process_text(text)
@@ -245,11 +262,17 @@ def crawl_website(seed_url: str, page: Page, max_articles: int, existing_hashes:
     visited = {seed_url}
     processed_articles = []
 
-    domain = urlparse(seed_url).netloc
-
+    # --- MODIFIED DOMAIN LOGIC ---
+    base_domain = get_base_domain(seed_url)
+    if not base_domain:
+        logging.error("Could not determine base domain for %s. Aborting crawl for this seed.", seed_url)
+        return []
+    logging.info("Starting crawl for base domain: %s", base_domain)
+    # --- END OF MODIFICATION ---
+    
     while queue and len(processed_articles) < max_articles:
         current_url = queue.popleft()
-        logging.info("Crawling: %s", current_url)
+        logging.info("Crawling: %s | Queue size: %d", current_url, len(queue))
         html = fetch_html_with_playwright(page, current_url)
         if not html:
             continue
@@ -260,9 +283,12 @@ def crawl_website(seed_url: str, page: Page, max_articles: int, existing_hashes:
             href = a['href']
             full_url = normalize_url(urljoin(current_url, href))
 
-            if urlparse(full_url).netloc != domain or full_url in visited:
+            # --- MODIFIED DOMAIN CHECK ---
+            link_base_domain = get_base_domain(full_url)
+            if not link_base_domain.endswith(base_domain) or full_url in visited:
                 continue
-
+            # --- END OF MODIFICATION ---
+                
             visited.add(full_url)
 
             if is_article_link(full_url):
@@ -275,7 +301,7 @@ def crawl_website(seed_url: str, page: Page, max_articles: int, existing_hashes:
                     if content_hash not in existing_hashes:
                         processed_articles.append(article_data)
                         existing_hashes.add(content_hash)
-                        logging.info("Successfully extracted article #%d from %s", len(processed_articles), full_url)
+                        logging.info("SUCCESS: Extracted article #%d from %s", len(processed_articles), full_url)
                         if len(processed_articles) >= max_articles: break
                     else:
                         logging.info("Skipping duplicate content from %s", full_url)
@@ -283,6 +309,7 @@ def crawl_website(seed_url: str, page: Page, max_articles: int, existing_hashes:
                 logging.debug("Adding to crawl queue: %s", full_url)
                 queue.append(full_url)
 
+        if len(processed_articles) >= max_articles: break
         time.sleep(CONFIG["sleep_interval"])
 
     return processed_articles
@@ -290,7 +317,7 @@ def crawl_website(seed_url: str, page: Page, max_articles: int, existing_hashes:
 def main():
     parser = argparse.ArgumentParser(description="Khmer Web Scraper")
     parser.add_argument('--url', type=str, help='Single article URL to scrape.')
-    parser.add_argument('--seed', type=str, help='Seed URL to start a crawl (e.g., "https://news.sabay.com.kh/").')
+    parser.add_argument('--seed', type=str, help='Seed URL to start a crawl.')
     parser.add_argument('--output', type=str, default=CONFIG["output_file"], help='Output JSONL file path.')
     parser.add_argument('--max', type=int, default=CONFIG["min_articles"], help='Target number of articles for a crawl.')
     args = parser.parse_args()
