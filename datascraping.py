@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-A generalized and compliant scraper for Khmer language websites.
-Usage:
-  Single URL: python3 datascraping.py --url "https://news.sabay.com.kh/article/1362478"
-  Seed crawl: python3 datascraping.py --seed "https://news.sabay.com.kh/" --output "/path/output.jsonl"
-"""
-
 import re
 import time
 import json
@@ -32,12 +25,7 @@ CONFIG = {
     "sleep_interval": 0.5,
     "user_agent": "Mozilla/5.0 (compatible; KhmerScraper/1.0; +http://example.com/bot)",
     "seed_sites": [
-        "https://news.sabay.com.kh/",
-        "https://freshnewsasia.com/",
-        "https://kohsantepheapdaily.com.kh/",
-        "https://thmeythmey.com/",
-        "https://www.rasmeinews.com/",
-        "https://popular.com.kh/",
+        "https://plus.freshnewsasia.com/",
     ],
     "article_link_patterns": ["/article/", "/news/", "/post/", "/detail/", re.compile(r'/\d{4,}/\d{2,}/')],
     "pagination_tokens": ["page", "p=", "/page/"],
@@ -53,10 +41,6 @@ CONFIG = {
         '[class*="related"]', '[id*="related"]', '[class*="comment"]', '[id*="comment"]',
         '[class*="advert"]', '[id*="advert"]', '[class*="cookie"]', '[id*="cookie"]',
         '[class*="promo"]', '[class*="subscribe"]', '[class*="sidebar"]', '[id*="sidebar"]'
-    ],
-    "prohibited_patterns": [
-        re.compile(r'(អាវុធ|គ្រាប់បែក)', re.UNICODE),
-        re.compile(r'(សាសនា|ព្រះពុទ្ធ|វត្ត)', re.UNICODE),
     ]
 }
 
@@ -204,11 +188,6 @@ def is_valid_content(text: str) -> bool:
     if word_count < CONFIG["min_words"]:
         logging.warning("Article too short (%d words).", word_count)
         return False
-
-    for pattern in CONFIG["prohibited_patterns"]:
-        if pattern.search(text):
-            logging.warning("Prohibited content found.")
-            return False
 
     sample = text[:1000]
     khmer_chars = len(re.findall(r'[\u1780-\u17FF]', sample))
