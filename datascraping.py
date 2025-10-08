@@ -339,34 +339,40 @@ def main():
         context = browser.new_context(user_agent=CONFIG["user_agent"])
         page = context.new_page()
         try:
-            with open(out_path, 'a', encoding='utf-8') as f:
-                if args.url:
-                    html = fetch_html_with_playwright(page, args.url)
-                    article = extract_article(html, args.url)
-                    if article:
-                        f.write(json.dumps(article, ensure_ascii=False) + "\n")
-                        logging.info("Successfully processed and saved single URL.")
-                    else:
-                        logging.error("Failed to process the provided URL.")
-                elif args.seed:
-                    articles = crawl_website(args.seed, page, args.max, existing_hashes)
-                    for article in articles:
-                        f.write(json.dumps(article, ensure_ascii=False) + "\n")
-                    logging.info("Crawl complete. Saved %d new articles.", len(articles))
-                else:
-                    total_written = 0
-                    for seed in CONFIG["seed_sites"]:
-                        if total_written >= args.max: break
-                        logging.info("--- Starting crawl for seed: %s ---", seed)
-                        needed = args.max - total_written
-                        articles = crawl_website(seed, page, needed, existing_hashes)
+            # --- WRAP THE CORE LOGIC IN A TRY BLOCK ---
+            try:
+                with open(out_path, 'a', encoding='utf-8') as f:
+                    if args.url:
+                        html = fetch_html_with_playwright(page, args.url)
+                        article = extract_article(html, args.url)
+                        if article:
+                            f.write(json.dumps(article, ensure_ascii=False) + "\n")
+                            logging.info("Successfully processed and saved single URL.")
+                        else:
+                            logging.error("Failed to process the provided URL.")
+                    elif args.seed:
+                        articles = crawl_website(args.seed, page, args.max, existing_hashes)
                         for article in articles:
                             f.write(json.dumps(article, ensure_ascii=False) + "\n")
-                        total_written += len(articles)
-                        logging.info("Finished crawl for %s. Wrote %d articles. Total: %d", seed, len(articles), total_written)
-        finally:
-            browser.close()
-    logging.info("Scraping finished.")
+                        logging.info("Crawl complete. Saved %d new articles.", len(articles))
+                    else:
+                        total_written = 0
+                        for seed in CONFIG["seed_sites"]:
+                            if total_written >= args.max: break
+                            logging.info("--- Starting crawl for seed: %s ---", seed)
+                            needed = args.max - total_written
+                            articles = crawl_website(seed, page, needed, existing_hashes)
+                            for article in articles:
+                                f.write(json.dumps(article, ensure_ascii=False) + "\n")
+                            total_written += len(articles)
+                            logging.info("Finished crawl for %s. Wrote %d articles. Total: %d", seed, len(articles), total_written)
+            
+            # --- CATCH THE INTERRUPTION HERE ---
+            except KeyboardInterrupt:
+                logging.warning("\nCtrl+C detected! Shutting down gracefully...")
 
-if __name__ == "__main__":
-    main()
+        finally:
+            logging.info("Closing browser...")
+            browser.close()
+            
+    logging.info("Scraping finished.")
